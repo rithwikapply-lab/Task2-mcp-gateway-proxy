@@ -6,6 +6,7 @@ export interface RecordedCall {
   method: string;
   tool?: string;
   hasAuthorization: boolean;
+  receivedHeaders: string[];
   timestamp: string;
 }
 
@@ -37,7 +38,7 @@ export function createMockServer(): MockServerInstance {
     res.json({ status: "reset" });
   });
 
-  function handleSingle(reqObj: any, hasAuth: boolean): any {
+  function handleSingle(reqObj: any, hasAuth: boolean, headerNames: string[]): any {
     const isNotification = !("id" in reqObj);
     const id = isNotification ? null : reqObj.id;
     const method = reqObj.method;
@@ -47,6 +48,7 @@ export function createMockServer(): MockServerInstance {
       method,
       tool,
       hasAuthorization: hasAuth,
+      receivedHeaders: headerNames,
       timestamp: new Date().toISOString()
     });
 
@@ -147,12 +149,32 @@ export function createMockServer(): MockServerInstance {
 
   app.post("/mcp", (req: Request, res: Response) => {
     const hasAuth = Boolean(req.headers.authorization);
+    const headerNames = Object.keys(req.headers).map((h) => h.toLowerCase());
     const body = req.body;
+
+    // SSE test endpoint support
+    if (!Array.isArray(body) && body && body.method === "test/sse") {
+      recordedCalls.push({
+        method: "test/sse",
+        hasAuthorization: hasAuth,
+        receivedHeaders: headerNames,
+        timestamp: new Date().toISOString()
+      });
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive"
+      });
+      res.write("event: message\ndata: chunk-one\n\n");
+      res.write("event: message\ndata: chunk-two\n\n");
+      res.end();
+      return;
+    }
 
     if (Array.isArray(body)) {
       const results: any[] = [];
       for (const item of body) {
-        const itemRes = handleSingle(item, hasAuth);
+        const itemRes = handleSingle(item, hasAuth, headerNames);
         if (itemRes !== null) {
           results.push(itemRes);
         }
@@ -165,7 +187,11 @@ export function createMockServer(): MockServerInstance {
       return;
     }
 
-    const singleRes = handleSingle(body, hasAuth);
+    if (body && body.method === "initialize") {
+      res.setHeader("mcp-session-id", "mock-session-12345");
+    }
+
+    const singleRes = handleSingle(body, hasAuth, headerNames);
     if (singleRes === null) {
       res.status(202).end();
       return;

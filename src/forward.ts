@@ -4,17 +4,11 @@ import { Readable } from "node:stream";
 import { GatewayConfig } from "./config.js";
 import { ErrorCodes, JsonRpcId } from "./jsonrpc.js";
 
-const HOP_BY_HOP_HEADERS = new Set([
-  "authorization",
-  "connection",
-  "keep-alive",
-  "transfer-encoding",
-  "te",
-  "trailer",
-  "upgrade",
-  "proxy-authorization",
-  "host",
-  "content-length"
+const FORWARD_HEADER_ALLOWLIST = new Set([
+  "content-type",
+  "accept",
+  "mcp-session-id",
+  "mcp-protocol-version"
 ]);
 
 export class ForwardError extends Error {
@@ -35,7 +29,7 @@ export function prepareForwardHeaders(incomingHeaders: http.IncomingHttpHeaders)
   const headers = new Headers();
   for (const [key, value] of Object.entries(incomingHeaders)) {
     const lowerKey = key.toLowerCase();
-    if (HOP_BY_HOP_HEADERS.has(lowerKey)) {
+    if (!FORWARD_HEADER_ALLOWLIST.has(lowerKey)) {
       continue;
     }
     if (value === undefined) continue;
