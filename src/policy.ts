@@ -18,6 +18,14 @@ export type PolicyDecision = PolicyAllow | PolicyDeny;
  * and converting to lower case. This provides defense-in-depth against Unicode confusable
  * or casing bypasses for admin tool names.
  */
+/**
+ * Normalizes a method name by stripping null bytes and format/control characters,
+ * trimming whitespace, applying NFKC Unicode normalization, and converting to lower case.
+ */
+export function normalizeMethod(method: string): string {
+  return method.replace(/[\0\p{Cc}\p{Cf}]/gu, "").trim().normalize("NFKC").toLowerCase();
+}
+
 export function normalizeToolName(name: string): string {
   return name.trim().normalize("NFKC").toLowerCase();
 }
@@ -31,7 +39,16 @@ export function normalizeToolName(name: string): string {
  * - all other methods: forwarded transparently for any authenticated role.
  */
 export function authorize(role: string, request: JsonRpcRequest): PolicyDecision {
-  const method = request.method;
+    const method = request.method;
+  const normalizedMethod = normalizeMethod(method);
+
+  if (method !== "tools/call" && normalizedMethod === "tools/call") {
+    return {
+      allowed: false,
+      code: ErrorCodes.METHOD_NOT_FOUND,
+      message: "Method not found"
+    };
+  }
 
   if (method === "tools/list") {
     return { allowed: true };

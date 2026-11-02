@@ -49,6 +49,7 @@ export const ErrorCodes = {
 export const ErrorHttpStatuses: Record<number, number> = {
   [-32700]: 400,
   [-32600]: 400,
+  [-32601]: 200,
   [-32602]: 200,
   [-32001]: 200,
   [-32002]: 401,

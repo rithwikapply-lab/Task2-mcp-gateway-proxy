@@ -464,6 +464,98 @@ describe("Gateway Integration & Denial Proof", () => {
   });
 
   describe("Method-Level Authorization & Denial Proof", () => {
+    it("rejects non-canonical tools/call methods with -32601 and 0 downstream calls", async () => {
+      const nonCanonicalMethods = [
+        "Tools/Call",
+        "TOOLS/CALL",
+        "tools/call ",
+        "tools/call\u0000"
+      ];
+
+      for (let i = 0; i < nonCanonicalMethods.length; i++) {
+        mockServer.reset();
+        const m = nonCanonicalMethods[i];
+        const res = await request(app)
+          .post("/mcp")
+          .set("Content-Type", "application/json")
+          .set("Authorization", "Bearer viewer-token")
+          .send({
+            jsonrpc: "2.0",
+            id: `norm-${i}`,
+            method: m,
+            params: { name: "admin_reset_key", arguments: {} }
+          });
+
+        expect(res.status).toBe(200);
+        expect(res.body.jsonrpc).toBe("2.0");
+        expect(res.body.id).toBe(`norm-${i}`);
+        expect(res.body.error.code).toBe(ErrorCodes.METHOD_NOT_FOUND);
+        expect(res.body.error.message).toBe("Method not found");
+        expect(mockServer.getStats().count).toBe(0);
+      }
+    });
+
+    it("returns 202 empty for non-canonical tools/call notification with 0 downstream calls", async () => {
+      const res = await request(app)
+        .post("/mcp")
+        .set("Content-Type", "application/json")
+        .set("Authorization", "Bearer viewer-token")
+        .send({
+          jsonrpc: "2.0",
+          method: "Tools/Call",
+          params: { name: "admin_reset_key", arguments: {} }
+        });
+
+      expect(res.status).toBe(202);
+      expect(res.text).toBe("");
+      expect(mockServer.getStats().count).toBe(0);
+    });
+
+    it("rejects non-canonical tools/call in batches with -32601 and 0 downstream calls", async () => {
+      const batch = [
+        { jsonrpc: "2.0", id: 101, method: "Tools/Call", params: { name: "admin_reset_key" } },
+        { jsonrpc: "2.0", id: 102, method: "TOOLS/CALL", params: { name: "admin_reset_key" } },
+        { jsonrpc: "2.0", id: 103, method: "tools/call ", params: { name: "admin_reset_key" } },
+        { jsonrpc: "2.0", id: 104, method: "tools/call\u0000", params: { name: "admin_reset_key" } }
+      ];
+
+      const res = await request(app)
+        .post("/mcp")
+        .set("Content-Type", "application/json")
+        .set("Authorization", "Bearer viewer-token")
+        .send(batch);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toHaveLength(4);
+      for (let i = 0; i < 4; i++) {
+        expect(res.body[i].id).toBe(101 + i);
+        expect(res.body[i].error.code).toBe(ErrorCodes.METHOD_NOT_FOUND);
+        expect(res.body[i].error.message).toBe("Method not found");
+      }
+      expect(mockServer.getStats().count).toBe(0);
+    });
+
+    it("handles mixed batch with allowed call and non-canonical tools/call", async () => {
+      const batch = [
+        { jsonrpc: "2.0", id: "ok-1", method: "tools/list" },
+        { jsonrpc: "2.0", id: "bad-1", method: "Tools/Call", params: { name: "admin_reset_key" } }
+      ];
+
+      const res = await request(app)
+        .post("/mcp")
+        .set("Content-Type", "application/json")
+        .set("Authorization", "Bearer viewer-token")
+        .send(batch);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toHaveLength(2);
+      expect(res.body[0].id).toBe("ok-1");
+      expect(res.body[0].result.tools).toBeDefined();
+      expect(res.body[1].id).toBe("bad-1");
+      expect(res.body[1].error.code).toBe(ErrorCodes.METHOD_NOT_FOUND);
+      expect(mockServer.getStats().count).toBe(1);
+    });
+
     it("forwards tools/list unmodified for viewer and admin", async () => {
       const res = await request(app)
         .post("/mcp")
