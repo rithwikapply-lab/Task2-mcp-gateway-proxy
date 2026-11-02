@@ -816,7 +816,7 @@ describe("Gateway Integration & Denial Proof", () => {
       expect(res.headers["content-type"]).toContain("application/json");
     });
 
-    it("streams SSE text/event-stream chunks without buffering", async () => {
+    it("passes through SSE text/event-stream body and content-type", async () => {
       const res = await request(app)
         .post("/mcp")
         .set("Content-Type", "application/json")
