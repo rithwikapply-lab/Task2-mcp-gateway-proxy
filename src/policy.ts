@@ -27,7 +27,8 @@ export function normalizeMethod(method: string): string {
 }
 
 export function normalizeToolName(name: string): string {
-  return name.trim().normalize("NFKC").toLowerCase();
+  const stripped = name.replace(/\p{Cf}/gu, "");
+  return stripped.trim().normalize("NFKC").toLowerCase();
 }
 
 /**
@@ -70,6 +71,14 @@ export function authorize(role: string, request: JsonRpcRequest): PolicyDecision
         allowed: false,
         code: ErrorCodes.INVALID_PARAMS,
         message: "Invalid params: tools/call requires a non-empty string 'name'"
+      };
+    }
+
+    if (/[\p{Cc}\p{Cf}]/u.test(toolName)) {
+      return {
+        allowed: false,
+        code: ErrorCodes.INVALID_PARAMS,
+        message: "Invalid params: tool name contains prohibited control or format characters"
       };
     }
 

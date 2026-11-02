@@ -657,6 +657,69 @@ describe("Gateway Integration & Denial Proof", () => {
       expect(mockServer.getStats().count).toBe(1);
     });
 
+    it("rejects tool names with control or format characters with -32602 for viewer and admin", async () => {
+      const invisibleTools = [
+        "admin\u200b_x",
+        "\u200badmin_x",
+        "admin_\u200bx",
+        "adm\u200din_x"
+      ];
+
+      for (const roleToken of ["viewer-token", "admin-token"]) {
+        for (const tool of invisibleTools) {
+          mockServer.reset();
+          const res = await request(app)
+            .post("/mcp")
+            .set("Content-Type", "application/json")
+            .set("Authorization", `Bearer ${roleToken}`)
+            .send({
+              jsonrpc: "2.0",
+              id: `inv-${tool}`,
+              method: "tools/call",
+              params: { name: tool, arguments: {} }
+            });
+
+          expect(res.status).toBe(200);
+          expect(res.body.jsonrpc).toBe("2.0");
+          expect(res.body.id).toBe(`inv-${tool}`);
+          expect(res.body.error.code).toBe(ErrorCodes.INVALID_PARAMS);
+          expect(res.body.error.message).toContain("control or format");
+          expect(mockServer.getStats().count).toBe(0);
+        }
+      }
+
+      // Proves normal names still work
+      mockServer.reset();
+      const adminNormal = await request(app)
+        .post("/mcp")
+        .set("Content-Type", "application/json")
+        .set("Authorization", "Bearer admin-token")
+        .send({
+          jsonrpc: "2.0",
+          id: "admin-ok",
+          method: "tools/call",
+          params: { name: "admin_reset_key", arguments: {} }
+        });
+      expect(adminNormal.status).toBe(200);
+      expect(adminNormal.body.result).toBeDefined();
+      expect(mockServer.getStats().count).toBe(1);
+
+      mockServer.reset();
+      const viewerNormal = await request(app)
+        .post("/mcp")
+        .set("Content-Type", "application/json")
+        .set("Authorization", "Bearer viewer-token")
+        .send({
+          jsonrpc: "2.0",
+          id: "viewer-ok",
+          method: "tools/call",
+          params: { name: "get_status", arguments: {} }
+        });
+      expect(viewerNormal.status).toBe(200);
+      expect(viewerNormal.body.result).toBeDefined();
+      expect(mockServer.getStats().count).toBe(1);
+    });
+
     it("returns -32602 directly when params or tool name is invalid", async () => {
       const resNoParams = await request(app)
         .post("/mcp")
