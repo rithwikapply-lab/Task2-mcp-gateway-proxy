@@ -104,7 +104,8 @@ The gateway maps protocol conditions to standard JSON-RPC 2.0 error codes and ap
 |---|---|---|---|---|
 | `-32700` | `400` | `ParseError` | Invalid JSON syntax in request body | `{ code: -32700, message: "Parse error" }` |
 | `-32600` | `400` | `InvalidRequest` | Invalid JSON-RPC structure or empty batch `[]` | `{ code: -32600, message: "Invalid Request" }` (id echoed if valid) |
-| `-32602` | `200` | `InvalidParams` | `tools/call` missing or non-string/empty `params.name` | `{ code: -32602, message: "Invalid params: ...", id }` |
+| `-32601` | `200` | `MethodNotFound` | Non-canonical `tools/call` method variant (e.g. `Tools/Call`, `tools/call `, `tools/call\0`) | `{ code: -32601, message: "Method not found", id }` (answered locally, downstream not called) |
+| `-32602` | `200` | `InvalidParams` | `tools/call` missing or invalid `params.name`, or tool name containing control (`\p{Cc}`) or format (`\p{Cf}`) characters | `{ code: -32602, message: "Invalid params: ...", id }` |
 | `-32001` | `200` | `UnauthorizedToolCall` | Non-admin user attempting an `admin_*` tool | `{ code: -32001, message: "Unauthorized Tool Call", data: { tool, requiredRole: "admin" } }` |
 | `-32002` | `401` | `AuthenticationRequired` | Missing, malformed, invalid, or expired credentials | `{ code: -32002, message: "Authentication required" }`, header `WWW-Authenticate: Bearer` |
 | `-32003` | `502` | `DownstreamUnavailable` | Downstream connection failed or unreachable | `{ code: -32003, message: "Bad Gateway" }` (URL and internals withheld) |
@@ -119,7 +120,7 @@ The Express application returned by `createApp(config)` executes an explicit lin
 
 1. **Request ID Middleware**: Generates a UUID (`crypto.randomUUID()`), attaches it to the request context, and sets `X-Request-Id` on the HTTP response.
 2. **Route Guard**:
-   - `GET /healthz`: Returns `200 {"status":"ok"}` without authentication.
+   - `GET /healthz` & `HEAD /healthz`: Returns `200` (`HEAD` returns an empty body) without authentication.
    - `POST /mcp`: Continues down the pipeline.
    - Any other method on `/mcp`: Emits `405 Method Not Allowed` with `Allow: POST` header.
    - Any other route: Emits `404 Not Found`.
@@ -150,10 +151,27 @@ JSON-RPC 2.0 specifications allow batch requests where multiple RPC calls are su
 
 Standard string checking (`toolName.startsWith("admin_")`) can be susceptible to bypasses involving unusual Unicode representations or whitespace padding if the downstream server interprets them loosely.
 
-The gateway incorporates deliberate normalization hardening in `src/policy.ts`:
+### Method-Name Hardening
+
+If a client sends a non-canonical casing or variation of `tools/call` (e.g. `Tools/Call`, `TOOLS/CALL`, `tools/call `, `tools/call\u0000`), the gateway normalizes the method:
+
+```typescript
+export function normalizeMethod(method: string): string {
+  return method.replace(/[\0\p{Cc}\p{Cf}]/gu, "").trim().normalize("NFKC").toLowerCase();
+}
+```
+
+If `method !== "tools/call"` but `normalizeMethod(method) === "tools/call"`, the gateway answers `-32601 "Method not found"` locally (HTTP 200, id echoed; a notification returns 202 with an empty body; inside batches the same rule applies). Downstream is never called.
+
+### Invisible and Control Character Tool Name Rejection
+
+A tool name containing any control character (`\p{Cc}`) or format character (`\p{Cf}`, including U+200B, U+200C, U+200D, U+2060, U+FEFF) is rejected with `-32602` for every role (admin and viewer) and never forwarded downstream.
+
+As defense-in-depth, format characters (`\p{Cf}`) are also stripped before the normalized admin check in `src/policy.ts`:
 ```typescript
 export function normalizeToolName(name: string): string {
-  return name.trim().normalize("NFKC").toLowerCase();
+  const stripped = name.replace(/\p{Cf}/gu, "");
+  return stripped.trim().normalize("NFKC").toLowerCase();
 }
 ```
 
@@ -190,7 +208,7 @@ The gateway logs all request outcomes to `stderr` as structured single-line JSON
 {"ts":"2026-11-02T21:47:40.974Z","level":"info","reqId":"7864ada7-9eef-43d0-9cb5-c563adbdf74e","role":"viewer","method":"tools/list","tool":null,"decision":"allow","status":200,"durationMs":23}
 ```
 
-- **Sanitization Guarantee**: Log events record metadata (`ts`, `level`, `reqId`, `role`, `method`, `tool`, `decision`, `status`, `durationMs`). Tokens, Authorization headers, and request bodies are strictly excluded.
+- **Sanitization Guarantee**: Log events record metadata (`ts`, `level`, `reqId`, `role`, `method`, `tool`, `decision`, `status`, `durationMs`). Tokens, Authorization headers, and request bodies are strictly excluded. Internal errors additionally write a plain-text stack trace to stderr, and all other events are one JSON line.
 - **Injectable Sink**: The logger supports custom sink functions, allowing integration tests to verify log cleanliness programmatically.
 
 ---
@@ -202,6 +220,8 @@ The gateway logs all request outcomes to `stderr` as structured single-line JSON
 3. **No Rate Limiting**: The gateway does not implement client IP or token-based rate limiting; external rate limiters should sit in front of the proxy for DDoS mitigation.
 4. **Pre-Authentication Body Read**: The incoming HTTP body is read and buffered up to `MAX_BODY` before authentication to allow raw JSON-RPC inspection; resource consumption is bounded by `MAX_BODY` (default 1MB).
 5. **No Token Revocation Store**: Tokens are evaluated statelessly; there is no per-request revocation list or distributed blacklist prior to token expiration.
+6. **Oversized Header Handling**: Node's default 16 KB header limit returns HTTP 431 for oversized Authorization headers before the application runs.
+7. **HTTP Method Support**: HEAD and OPTIONS handling is minimal; GET /healthz and HEAD /healthz return 200 for health checks, while other methods on /healthz return 404.
 
 ---
 
@@ -217,7 +237,7 @@ The gateway logs all request outcomes to `stderr` as structured single-line JSON
    - Strict header allowlist: only approved headers (`content-type`, `accept`, `mcp-session-id`, `mcp-protocol-version`) reach downstream.
    - Downstream network errors map to HTTP 502 (`-32003`) and timeouts map to HTTP 504 (`-32004`) with safe generic error messages.
 3. **Fine-Grained Method-Level Authorization & Clean Error Handling**:
-   - Constant-time HS256 JWT signature verification and static token authentication.
+   - Constant-time JWT signature comparison; static tokens are an exact-match map lookup.
    - `tools/list` forwarded transparently without filtering.
    - `admin_*` tool calls intercepted directly at HTTP 200 with `-32001` and detailed error metadata.
    - Proved via test suite that unauthorized tool attempts never reach downstream.
