@@ -1,6 +1,6 @@
 # MCP Gateway Proxy
 
-A high-performance HTTP/JSON-RPC reverse proxy and security gateway written in TypeScript for the Model Context Protocol (MCP). The gateway sits between a client and a downstream MCP server, enforcing fine-grained method-level authorization, role-based tool restrictions, and strict protocol wire validation.
+An HTTP/JSON-RPC reverse proxy and security gateway written in TypeScript for the Model Context Protocol (MCP). The gateway sits between a client and a downstream MCP server, enforcing fine-grained method-level authorization, role-based tool restrictions, and strict protocol wire validation.
 
 ## Features
 
@@ -14,6 +14,7 @@ A high-performance HTTP/JSON-RPC reverse proxy and security gateway written in T
 - **Strict Wire-Format Validation**: Hand-written JSON-RPC 2.0 parser without external schema dependencies, guaranteeing accurate `-32700` and `-32600` responses and exact ID preservation.
 - **Zero Token Leakage**: Structured JSON logging to stderr with strict sanitization, never recording tokens, Authorization headers, or request bodies.
 - **Streaming Forwarding**: Single unmodified requests are streamed directly from downstream using global `fetch` without buffering server-sent events (SSE).
+- **Header Allowlist Enforcement**: Forwards only approved headers (`content-type`, `accept`, `mcp-session-id`, `mcp-protocol-version`), ensuring client cookies and authorization credentials never reach downstream.
 
 ---
 
@@ -21,7 +22,7 @@ A high-performance HTTP/JSON-RPC reverse proxy and security gateway written in T
 
 ### Prerequisites
 
-- Node.js 18+ (tested on Node.js 20 and 24)
+- Node.js 18+ (tested on Node.js v24.10.0)
 - npm 9+
 
 ### Installation & Build
@@ -126,31 +127,22 @@ The Express application returned by `createApp(config)` executes an explicit lin
 4. **Authentication**: Resolves user role. On failure, emits `401 Unauthorized` with `WWW-Authenticate: Bearer` and `-32002` error.
 5. **JSON-RPC Parsing & Validation**: Parses raw buffer into JSON. Validates single requests, notifications, client responses, and batches.
 6. **Authorization Policy**: Pure function `authorize(role, request)` evaluates tool permissions.
-7. **Forwarding Engine**: Dispatches allowed calls to downstream, stripping hop-by-hop and `Authorization` headers, with abort timeout management.
+7. **Forwarding Engine**: Dispatches allowed calls to downstream using an explicit header allowlist (`content-type`, `accept`, `mcp-session-id`, `mcp-protocol-version`), with abort timeout management.
 8. **Error Middleware**: Catches unhandled throws and returns safe `500 -32603` responses without leaking internal state.
 
 ---
 
-## Batch Handling
+## Batch Handling & Notifications
 
 JSON-RPC 2.0 specifications allow batch requests where multiple RPC calls are submitted in a single JSON array.
 
-### Why Custom Batch Handling is Necessary
-
-A client may send a heterogeneous batch containing:
-1. Valid permitted requests (e.g. `tools/list`)
-2. Unauthorized administrative requests (e.g. `tools/call admin_reset_key`)
-3. Malformed JSON-RPC frames
-
-If a proxy blindly forwards the batch, unauthorized actions reach the downstream server. Conversely, rejecting the entire batch denies legitimate calls.
-
-### How the Gateway Processes Batches
+### Independent Evaluation & Selective Forwarding
 
 1. **Independent Evaluation**: Every item in the batch is validated and authorized independently.
-2. **Selective Forwarding**: Only permitted items are bundled into a sub-batch forwarded to downstream. Unauthorized elements immediately generate `-32001` error objects locally.
-3. **Zero Downstream Calls for All-Denied Batches**: If every element in a batch is unauthorized or malformed, the downstream server is never called.
-4. **Order Preservation**: Downstream responses are correlated with local error entries and assembled in the exact original order of the client batch.
-5. **Notification Support**: Batches consisting solely of allowed notifications return HTTP `202 Accepted` with an empty body.
+2. **Notification Rules**: A single or batch element without an `id` (a notification) that is denied or invalid produces no response body (single returns HTTP 202 with an empty body; in a batch its entry is omitted). Denied notifications are never forwarded.
+3. **Queue-Based Reply Matching**: To prevent dropping or miscorrelating responses when duplicate request IDs or `id: null` entries exist, downstream responses are matched using FIFO queues per ID (`Map<JsonRpcId, number[]>`).
+4. **Zero Downstream Calls for All-Denied Batches**: If every element in a batch is unauthorized or malformed, the downstream server is never called.
+5. **Notification-Only Batches**: Batches consisting solely of allowed notifications return HTTP `202 Accepted` with an empty body.
 
 ---
 
@@ -184,7 +176,7 @@ Standard reverse proxy middleware (`http-proxy-middleware`) operates at the stre
 - Block specific elements while permitting others in the same connection.
 
 By utilizing Node.js native `fetch` with `AbortController`, the gateway:
-- Retains full control over outgoing request headers (stripping `Authorization` and hop-by-hop headers).
+- Retains full control over outgoing request headers, forwarding only allowlisted headers.
 - Streams single responses and SSE chunks directly to the client via `Readable.fromWeb(response.body).pipe(res)`.
 - Handles connection timeouts cleanly via `AbortSignal`.
 
@@ -203,6 +195,16 @@ The gateway logs all request outcomes to `stderr` as structured single-line JSON
 
 ---
 
+## Limitations
+
+1. **Raw Body Forwarding After Authorization**: For single requests, the raw body buffer is forwarded downstream after an authorized copy is parsed in JavaScript. If downstream uses a non-standard JSON parser that treats duplicate keys differently, parser discrepancy is a theoretical risk.
+2. **Static Token Lookup Timing**: Static token resolution uses standard JavaScript hash map lookup (`Object.prototype.hasOwnProperty`), which is not constant-time. Constant-time comparison is enforced for cryptographic JWT signatures.
+3. **No Rate Limiting**: The gateway does not implement client IP or token-based rate limiting; external rate limiters should sit in front of the proxy for DDoS mitigation.
+4. **Pre-Authentication Body Read**: The incoming HTTP body is read and buffered up to `MAX_BODY` before authentication to allow raw JSON-RPC inspection; resource consumption is bounded by `MAX_BODY` (default 1MB).
+5. **No Token Revocation Store**: Tokens are evaluated statelessly; there is no per-request revocation list or distributed blacklist prior to token expiration.
+
+---
+
 ## Scoring Criteria Fulfillment
 
 1. **Correct JSON-RPC Wire-Format Parsing**:
@@ -212,10 +214,10 @@ The gateway logs all request outcomes to `stderr` as structured single-line JSON
    - Rejects non-objects and empty batches with `-32600`.
 2. **Proxy Middleware Construction & Request/Response Forwarding**:
    - Explicit Express middleware pipeline in `src/app.ts` with strict route and content-type enforcement.
-   - Robust header stripping: `Authorization` and all hop-by-hop headers are removed before forwarding.
+   - Strict header allowlist: only approved headers (`content-type`, `accept`, `mcp-session-id`, `mcp-protocol-version`) reach downstream.
    - Downstream network errors map to HTTP 502 (`-32003`) and timeouts map to HTTP 504 (`-32004`) with safe generic error messages.
 3. **Fine-Grained Method-Level Authorization & Clean Error Handling**:
-   - Constant-time HS256 JWT and static token authentication.
+   - Constant-time HS256 JWT signature verification and static token authentication.
    - `tools/list` forwarded transparently without filtering.
    - `admin_*` tool calls intercepted directly at HTTP 200 with `-32001` and detailed error metadata.
    - Proved via test suite that unauthorized tool attempts never reach downstream.
@@ -241,9 +243,9 @@ mcp-gateway-proxy/
 │   ├── auth.ts           # Bearer token and HS256 JWT role extraction
 │   ├── jsonrpc.ts        # JSON-RPC 2.0 validation and error builders
 │   ├── policy.ts         # Pure tool authorization policy and normalization
-│   └── forward.ts        # Global fetch forwarder with header stripping and timeout
+│   └── forward.ts        # Global fetch forwarder with header allowlist and timeout
 ├── mock/
-│   └── downstream.js     # Downstream mock MCP server with call tracking
+│   └── downstream.ts     # Downstream mock MCP server with call tracking
 └── test/
     ├── auth.test.ts      # Authentication and token edge cases
     ├── jsonrpc.test.ts   # JSON-RPC wire-format compliance tests
@@ -251,9 +253,3 @@ mcp-gateway-proxy/
     ├── gateway.test.ts   # Supertest gateway integration and denial proofs
     └── e2e.test.ts       # Spawned child process end-to-end tests
 ```
-
----
-
-## License
-
-MIT
