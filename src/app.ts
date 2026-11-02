@@ -12,11 +12,26 @@ import {
   ParsedItem
 } from "./jsonrpc.js";
 import { authorize } from "./policy.js";
-import { ForwardError, forwardBatchJson, forwardSingleStream } from "./forward.js";
+import {
+  ForwardError,
+  forwardBatchJson as defaultForwardBatchJson,
+  forwardSingleStream as defaultForwardSingleStream
+} from "./forward.js";
 
-export function createApp(config: GatewayConfig, customLogger?: Logger): express.Express {
+export interface AppDependencies {
+  forwardSingleStream?: typeof defaultForwardSingleStream;
+  forwardBatchJson?: typeof defaultForwardBatchJson;
+}
+
+export function createApp(
+  config: GatewayConfig,
+  customLogger?: Logger,
+  deps?: AppDependencies
+): express.Express {
   const app = express();
   const log = customLogger || defaultLogger;
+  const forwardStream = deps?.forwardSingleStream || defaultForwardSingleStream;
+  const forwardBatch = deps?.forwardBatchJson || defaultForwardBatchJson;
 
   // 1. Request ID middleware
   app.use((req: Request, res: Response, next: NextFunction) => {
@@ -82,9 +97,6 @@ export function createApp(config: GatewayConfig, customLogger?: Logger): express
     const startTime = (req as any).startTime as number;
 
     try {
-      if ((config as any)._forceInternalThrow) {
-        throw new Error("SecretDatabasePasswordFailure: db://root:secret@10.0.0.1");
-      }
       // Authenticate
       const authHeader = req.headers.authorization;
       const authRes = authenticate(authHeader, config.staticTokens, config.jwtSecret);
@@ -174,7 +186,7 @@ export function createApp(config: GatewayConfig, customLogger?: Logger): express
         const item: ParsedItem = payload.item;
 
         if (item.kind === "client_response") {
-          await forwardSingleStream(req, res, rawBuffer, config, item.id);
+          await forwardStream(req, res, rawBuffer, config, item.id);
           log.info({
             reqId,
             role,
@@ -209,6 +221,21 @@ export function createApp(config: GatewayConfig, customLogger?: Logger): express
 
         const decision = authorize(role, item.request);
         if (!decision.allowed) {
+          // If the denied item is a notification (no id), omit response body
+          if (item.isNotification) {
+            res.status(202).end();
+            log.warn({
+              reqId,
+              role,
+              method: item.request.method,
+              tool: typeof toolName === "string" ? toolName : null,
+              decision: "deny",
+              status: 202,
+              durationMs: Date.now() - startTime
+            });
+            return;
+          }
+
           const status = ErrorHttpStatuses[decision.code] || 200;
           const errRes = createJsonRpcError(
             decision.code,
@@ -231,7 +258,7 @@ export function createApp(config: GatewayConfig, customLogger?: Logger): express
         }
 
         // Forward allowed single request unmodified
-        await forwardSingleStream(req, res, rawBuffer, config, item.id);
+        await forwardStream(req, res, rawBuffer, config, item.id);
         log.info({
           reqId,
           role,
@@ -269,12 +296,15 @@ export function createApp(config: GatewayConfig, customLogger?: Logger): express
         // it.kind === "request"
         const decision = authorize(role, it.request);
         if (!decision.allowed) {
-          finalResponses[i] = createJsonRpcError(
-            decision.code,
-            decision.message,
-            it.id,
-            decision.data
-          );
+          // Omit response for denied notifications
+          if (!it.isNotification) {
+            finalResponses[i] = createJsonRpcError(
+              decision.code,
+              decision.message,
+              it.id,
+              decision.data
+            );
+          }
         } else {
           toForward.push({
             originalIndex: i,
@@ -307,7 +337,7 @@ export function createApp(config: GatewayConfig, customLogger?: Logger): express
 
       // Forward only allowed items
       const batchPayload = toForward.map((tf) => tf.item);
-      const downstreamResult = await forwardBatchJson(
+      const downstreamResult = await forwardBatch(
         batchPayload,
         req.headers,
         config,
@@ -315,7 +345,6 @@ export function createApp(config: GatewayConfig, customLogger?: Logger): express
       );
 
       if (downstreamResult.status === 202 || downstreamResult.data === null) {
-        // Downstream returned 202 or empty body
         const filtered = finalResponses.filter((x) => x !== undefined && x !== null);
         if (filtered.length === 0) {
           res.status(202).end();
@@ -325,23 +354,32 @@ export function createApp(config: GatewayConfig, customLogger?: Logger): express
         return;
       }
 
-      // Map downstream replies into finalResponses
+      // Map downstream replies into finalResponses using queue per id (handles duplicate ids and id: null)
       const downstreamData = downstreamResult.data;
       if (Array.isArray(downstreamData)) {
-        const idToOriginalIndex = new Map<JsonRpcId, number>();
+        const idToQueue = new Map<JsonRpcId, number[]>();
         const openForwardSlots: number[] = [];
 
         for (const tf of toForward) {
-          if (!tf.isNotification && tf.id !== null) {
-            idToOriginalIndex.set(tf.id, tf.originalIndex);
+          if (!tf.isNotification) {
+            const key = tf.id;
+            let queue = idToQueue.get(key);
+            if (!queue) {
+              queue = [];
+              idToQueue.set(key, queue);
+            }
+            queue.push(tf.originalIndex);
           } else {
             openForwardSlots.push(tf.originalIndex);
           }
         }
 
         for (const reply of downstreamData) {
-          if (reply && typeof reply === "object" && "id" in reply && idToOriginalIndex.has(reply.id)) {
-            const idx = idToOriginalIndex.get(reply.id)!;
+          const replyId: JsonRpcId =
+            reply && typeof reply === "object" && "id" in reply ? reply.id : null;
+          const queue = idToQueue.get(replyId);
+          if (queue && queue.length > 0) {
+            const idx = queue.shift()!;
             finalResponses[idx] = reply;
           } else if (openForwardSlots.length > 0) {
             const idx = openForwardSlots.shift()!;
@@ -349,7 +387,6 @@ export function createApp(config: GatewayConfig, customLogger?: Logger): express
           }
         }
       } else if (typeof downstreamData === "object" && downstreamData !== null) {
-        // Single response object returned for single forwarded request
         if (toForward.length === 1) {
           finalResponses[toForward[0].originalIndex] = downstreamData;
         }
