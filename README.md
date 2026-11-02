@@ -1,6 +1,6 @@
 # MCP Gateway Proxy
 
-A high-performance HTTP/JSON-RPC reverse proxy and security gateway written in TypeScript for the Model Context Protocol (MCP). The gateway sits between an AI client and a downstream MCP server, enforcing fine-grained method-level authorization, role-based tool restrictions, and strict protocol wire validation.
+A high-performance HTTP/JSON-RPC reverse proxy and security gateway written in TypeScript for the Model Context Protocol (MCP). The gateway sits between a client and a downstream MCP server, enforcing fine-grained method-level authorization, role-based tool restrictions, and strict protocol wire validation.
 
 ## Features
 
