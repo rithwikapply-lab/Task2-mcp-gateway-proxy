@@ -82,6 +82,9 @@ export function createApp(config: GatewayConfig, customLogger?: Logger): express
     const startTime = (req as any).startTime as number;
 
     try {
+      if ((config as any)._forceInternalThrow) {
+        throw new Error("SecretDatabasePasswordFailure: db://root:secret@10.0.0.1");
+      }
       // Authenticate
       const authHeader = req.headers.authorization;
       const authRes = authenticate(authHeader, config.staticTokens, config.jwtSecret);
