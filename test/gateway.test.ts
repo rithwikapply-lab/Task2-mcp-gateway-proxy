@@ -62,8 +62,20 @@ describe("Gateway Integration & Denial Proof", () => {
       expect(res.headers["x-request-id"]).toBeDefined();
     });
 
+    it("HEAD /healthz returns 200 with an empty body", async () => {
+      const res = await request(app).head("/healthz");
+      expect(res.status).toBe(200);
+      expect(res.text).toBeUndefined();
+      expect(res.headers["x-request-id"]).toBeDefined();
+    });
+
     it("POST /healthz returns 404", async () => {
       const res = await request(app).post("/healthz");
+      expect(res.status).toBe(404);
+    });
+
+    it("DELETE /healthz returns 404", async () => {
+      const res = await request(app).delete("/healthz");
       expect(res.status).toBe(404);
     });
 

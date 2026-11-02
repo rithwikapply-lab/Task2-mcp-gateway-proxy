@@ -49,6 +49,10 @@ export function createApp(
         res.status(200).json({ status: "ok" });
         return;
       }
+      if (req.method === "HEAD") {
+        res.status(200).end();
+        return;
+      }
       res.status(404).end();
       return;
     }
